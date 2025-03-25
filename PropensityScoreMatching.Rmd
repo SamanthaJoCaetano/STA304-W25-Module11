@@ -1,0 +1,229 @@
+---
+title: "Causal Inference"
+author: "Samantha-Jo Caetano"
+date: "April 1, 2025"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(broom)
+library(tidyverse)
+```
+
+# Propensity Score Matching
+
+## Simulating the data
+
+### Let's simulate some Amazon user demographic data
+
+To do this we first need some data. Let's simulate some data to illustrate propensity score matching. Let's pretend that we work for Amazon. We are going to "treat" some individuals with free-shipping to see what happens to their average purchase.
+
+```{r}
+sample_size <- 10000
+set.seed(853)
+
+# Variables
+
+unique_person_id = c(1:sample_size)
+age = runif(n = sample_size, min = 18, max = 100)
+city = sample(x = c("Toronto", "Montreal", "Calgary"),
+      size = sample_size,
+      replace = TRUE)
+gender = sample(x = c("Female", "Male", "Other/decline"),
+      size = sample_size,
+      replace = TRUE,
+      prob = c(0.49, 0.47, 0.02))
+income = rlnorm(n = sample_size,
+                    meanlog = 0.5, 
+                    sdlog = 1)
+
+# Data Frame
+
+amazon_purchase_data <- tibble(unique_person_id,
+                               age,
+                               city,
+                               gender,
+                               income)
+
+```
+
+
+### Adding in the treatment (free shipping)
+
+Now we need to add some probability of being treated with free shipping, which depends on our variables. Let's assume younger, higher-income, male and in Toronto all make it slightly more likely.
+
+Let's start by creating a scoring system.
+
+```{r}
+amazon_purchase_data <-
+  amazon_purchase_data %>% 
+  mutate(age_num = case_when(
+    age < 30 ~ 3,
+    age < 50 ~ 2,
+    age < 70 ~ 1,
+    TRUE ~ 0),
+    city_num = case_when(
+      city == "Toronto" ~ 3,
+      city == "Montreal" ~ 2,
+      city == "Calgary" ~ 1,
+      TRUE ~ 0),
+    gender_num = case_when(
+      gender == "Male" ~ 3,
+      gender == "Female" ~ 2,
+      gender == "Other/decline" ~ 1,
+      TRUE ~ 0),
+    income_num = case_when(
+      income > 3 ~ 3,
+      income > 2 ~ 2,
+      income > 1 ~ 1,
+      TRUE ~ 0)
+  )
+
+```
+
+Now that we have the scoring system to help us "indicate" whether or not someone is likely to get free shipping, let's actually create the free shipping (treatment) indicator variable.
+
+```{r}
+amazon_purchase_data <- 
+  amazon_purchase_data %>% 
+  rowwise() %>% 
+  mutate(sum_num = sum(age_num, city_num, gender_num, income_num)) %>% 
+  mutate(softmax_prob = exp(sum_num)/exp(12)) %>% 
+  mutate(free_shipping = sample(
+           x = c(0:1),
+           size = 1,
+           replace = TRUE,
+           prob = c(1-softmax_prob, softmax_prob)
+         ) 
+      ) %>% 
+  ungroup()
+```
+
+Great, now we have a treatment variable, but the `age_num`, `gender_num`, etc., are somewhat distracting.
+
+
+### Cleaning the simulated data a bit
+
+Okay, now that we finally have the treatment variable, we should remove all the variables we simulated to get us there.
+
+```{r}
+amazon_purchase_data <-
+  amazon_purchase_data %>% 
+  dplyr::select(-age_num, -city_num, -gender_num, -income_num, 
+                -sum_num, -softmax_prob)
+
+```
+
+
+### Adding in the outcome (spending)
+
+Finally, we need to have some measure of a person's  average spend. We want those with free shipping to be slightly higher than those without.
+
+```{r}
+amazon_purchase_data <-
+  amazon_purchase_data %>% 
+  mutate(mean_spend = if_else(free_shipping == 1, 60, 50)) %>% 
+  rowwise() %>% 
+  mutate(average_spend = rnorm(1, mean_spend, sd = 5)
+  ) %>% 
+  ungroup()
+```
+
+Great, now I will just remove the mean spending variable.
+
+```{r}
+amazon_purchase_data <- amazon_purchase_data %>% select(-mean_spend)
+```
+
+### Cleaning a bit more
+
+Fix the class on some variables.
+
+```{r}
+amazon_purchase_data <-
+  amazon_purchase_data %>% 
+  mutate(city = as.factor(city), 
+         gender = as.factor(gender), 
+         free_shipping = as.factor(free_shipping)) # Change some to factors
+
+table(amazon_purchase_data$free_shipping)
+```
+
+## Propensity Score Matching
+
+### Looking at the data
+
+This is the starting point of the analysis. Let's take a glimpse at the simulated data
+
+```{r}
+head(amazon_purchase_data)
+glimpse(amazon_purchase_data)
+```
+ 
+Recall: free-shipping is our treatment and average spending is our outcome of interest.
+
+Propensity score matching it will be for the free-shipping propensity.
+
+Now we construct a logistic regression model that 'explains' whether a person was treated as a function of the variables that we think explain it.
+
+```{r}
+propensity_score <- glm(free_shipping ~ age + city + gender + income, 
+                        family = binomial,
+                        data = amazon_purchase_data)
+```
+
+We will now add our forecast to our dataset.
+
+
+```{r}
+amazon_purchase_data <- 
+  amazon_purchase_data %>% 
+  mutate(
+    prob_of_trt = predict(propensity_score, type="response")
+  ) 
+```
+
+Now we use our forecast to create matches.For every person who was actually treated (given free shipping) we want the untreated person who was considered as similar to them (based on propensity score) as possible.
+
+```{r}
+amazon_purchase_data <- 
+  amazon_purchase_data %>% 
+  arrange(prob_of_trt, free_shipping)
+```
+
+Here we're going to use a matching function from the arm package. This finds which is the closest of the ones that were not treated, to each one that was treated.
+
+```{r}
+amazon_purchase_data$treated <- 
+  if_else(amazon_purchase_data$free_shipping == 0, 0, 1)
+
+# Create a new variable called "treat" which is a 0 or 1.
+amazon_purchase_data$treated <- 
+  as.integer(amazon_purchase_data$treated)
+
+
+
+matches <- arm::matching(z = amazon_purchase_data$treated, 
+                         score = amazon_purchase_data$prob_of_trt)
+
+  # the function returns:                 
+  # 1) match.ind: a vector of indices that the corresponding unit is  
+  #    matched to.   
+  # 2) cnts:  shows the number of times each unit will be used in any 
+  #    subsequent analyses (1 for each treated unit and number of     
+  #    times used as a match for each control unit (equivalently the  
+  #    number of treated units it is matched to)                      
+  # 3) pairs:  id for the matched matched pair 
+
+amazon_purchase_data <- cbind(amazon_purchase_data, matches)
+```
+
+
+
+
+
+
