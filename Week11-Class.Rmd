@@ -5,203 +5,6 @@ date: "April 1, 2025"
 output: pdf_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
-
-```{r}
-library(broom)
-library(tidyverse)
-```
-
-# MICE Example
-
-Let's look at the starwars data
-
-```{r}
-starwars_data <- starwars
-
-head(starwars_data)
-
-starwars_data %>% summarise(n=n(),
-                            n_missing_hair = sum(is.na(hair_color)),
-                            n_missing_eye = sum(is.na(eye_color)),
-                            n_missing_skin = sum(is.na(skin_color)),
-                            n_birth_year = sum(is.na(birth_year)),
-                            n_height = sum(is.na(height)),
-                            n_mass = sum(is.na(mass)))
-```
-
-
-```{r}
-#install.packages("mice")
-library(mice)
-
-starwars_data_reduced <- starwars_data %>% select(hair_color, height, mass)
-
-init = mice(starwars_data_reduced, maxit=0) 
-meth = init$method
-predM = init$predictorMatrix
-
-#If you want to skip a variable from imputation use the code below. #Keep in mind that this variable will be used for prediction.
-
-meth[c("mass")]=""
-
-# Now let specify the methods for imputing the missing values. There are specific methods for continues, binary and ordinal variables. I set different methods for each variable. You can add more than one variable in each methods.
-
-meth[c("height")]="norm" 
-meth[c("hair_color")]="polyreg"
-
-# Now it is time to run the multiple (m=5) imputation.
-
-set.seed(103)
-imputed = mice(starwars_data_reduced, method=meth, predictorMatrix=predM, m=5)
-
-# Store this as a data set after imputation
-starwars_imputed <- complete(imputed)
-
-```
-
-Note: you could use a test vs training set to check the accuracy of this. But that is for a future lesson/class.
-
-# Propensity Score Matching
-
-## Simulating the data
-
-### Let's simulate some Amazon user demographic data
-
-To do this we first need some data. Let's simulate some data to illustrate propensity score matching. Let's pretend that we work for Amazon. We are going to "treat" some individuals with free-shipping to see what happens to their average purchase.
-
-```{r}
-sample_size <- 10000
-set.seed(853)
-
-# Variables
-
-unique_person_id = c(1:sample_size)
-age = runif(n = sample_size, min = 18, max = 100)
-city = sample(x = c("Toronto", "Montreal", "Calgary"),
-      size = sample_size,
-      replace = TRUE)
-gender = sample(x = c("Female", "Male", "Other/decline"),
-      size = sample_size,
-      replace = TRUE,
-      prob = c(0.49, 0.47, 0.02))
-income = rlnorm(n = sample_size,
-                    meanlog = 0.5, 
-                    sdlog = 1)
-
-# Data Frame
-
-amazon_purchase_data <- tibble(unique_person_id,
-                               age,
-                               city,
-                               gender,
-                               income)
-
-```
-
-
-### Adding in the treatment (free shipping)
-
-Now we need to add some probability of being treated with free shipping, which depends on our variables. Let's assume younger, higher-income, male and in Toronto all make it slightly more likely.
-
-Let's start by creating a scoring system.
-
-```{r}
-amazon_purchase_data <-
-  amazon_purchase_data %>% 
-  mutate(age_num = case_when(
-    age < 30 ~ 3,
-    age < 50 ~ 2,
-    age < 70 ~ 1,
-    TRUE ~ 0),
-    city_num = case_when(
-      city == "Toronto" ~ 3,
-      city == "Montreal" ~ 2,
-      city == "Calgary" ~ 1,
-      TRUE ~ 0),
-    gender_num = case_when(
-      gender == "Male" ~ 3,
-      gender == "Female" ~ 2,
-      gender == "Other/decline" ~ 1,
-      TRUE ~ 0),
-    income_num = case_when(
-      income > 3 ~ 3,
-      income > 2 ~ 2,
-      income > 1 ~ 1,
-      TRUE ~ 0)
-  )
-
-```
-
-Now that we have the scoring system to help us "indicate" whether or not someone is likely to get free shipping, let's actually create the free shipping (treatment) indicator variable.
-
-```{r}
-amazon_purchase_data <- 
-  amazon_purchase_data %>% 
-  rowwise() %>% 
-  mutate(sum_num = sum(age_num, city_num, gender_num, income_num)) %>% 
-  mutate(softmax_prob = exp(sum_num)/exp(12)) %>% 
-  mutate(free_shipping = sample(
-           x = c(0:1),
-           size = 1,
-           replace = TRUE,
-           prob = c(1-softmax_prob, softmax_prob)
-         ) 
-      ) %>% 
-  ungroup()
-```
-
-Great, now we have a treatment variable, but the `age_num`, `gender_num`, etc., are somewhat distracting.
-
-
-### Cleaning the simulated data a bit
-
-Okay, now that we finally have the treatment variable, we should remove all the variables we simulated to get us there.
-
-```{r}
-amazon_purchase_data <-
-  amazon_purchase_data %>% 
-  dplyr::select(-age_num, -city_num, -gender_num, -income_num, 
-                -sum_num, -softmax_prob)
-
-```
-
-
-### Adding in the outcome (spending)
-
-Finally, we need to have some measure of a person's  average spend. We want those with free shipping to be slightly higher than those without.
-
-```{r}
-amazon_purchase_data <-
-  amazon_purchase_data %>% 
-  mutate(mean_spend = if_else(free_shipping == 1, 60, 50)) %>% 
-  rowwise() %>% 
-  mutate(average_spend = rnorm(1, mean_spend, sd = 5)
-  ) %>% 
-  ungroup()
-```
-
-Great, now I will just remove the mean spending variable.
-
-```{r}
-amazon_purchase_data <- amazon_purchase_data %>% select(-mean_spend)
-```
-
-### Cleaning a bit more
-
-Fix the class on some variables.
-
-```{r}
-amazon_purchase_data <-
-  amazon_purchase_data %>% 
-  mutate(city = as.factor(city), 
-         gender = as.factor(gender), 
-         free_shipping = as.factor(free_shipping)) # Change some to factors
-
-table(amazon_purchase_data$free_shipping)
-```
 
 ## Propensity Score Matching
 
@@ -210,13 +13,19 @@ table(amazon_purchase_data$free_shipping)
 This is the starting point of the analysis. Let's take a glimpse at the simulated data
 
 ```{r}
+library(tidyverse)
+amazon_purchase_data <- read_csv("Amazon.csv") 
+  
+  
 head(amazon_purchase_data)
 glimpse(amazon_purchase_data)
 ```
  
-Recall: free-shipping is our treatment and average spending is our outcome of interest.
+We are interested in looking at the relationship between "free shipping" and "spending amount".
 
-Propensity score matching it will be for the free-shipping propensity.
+So free-shipping is our treatment and average spending is our outcome of interest.
+
+Propensity score matching will be for the free-shipping propensity.
 
 Now we construct a logistic regression model that 'explains' whether a person was treated as a function of the variables that we think explain it.
 
@@ -227,7 +36,6 @@ propensity_score <- glm(free_shipping ~ age + city + gender + income,
 ```
 
 We will now add our forecast to our dataset.
-
 
 ```{r}
 amazon_purchase_data <- 
@@ -295,133 +103,4 @@ propensity_score_regression <-
 
 summary(propensity_score_regression)
 ```
-
-
-\newpage
-
-# Difference In Differences
-
-```{r}
-set.seed(853)
-
-n=1000
-diff_in_diff_example_data <- tibble(person = rep(c(1:n), times = 2),
-                                    time = c(rep(0, times = n), rep(1, times = n)),
-                                    treatment_group = 
-                                      rep(sample(x = 0:1, size  = n, replace = TRUE), 
-                                          times = 2)
-)
-
-# We want to make the outcome slightly more likely if they were treated than if not.
-diff_in_diff_example_data <- 
-  diff_in_diff_example_data %>% 
-  rowwise() %>% 
-  mutate(serve_speed = case_when(
-    time == 0 & treatment_group == 0 ~ rnorm(n = 1, mean = 5, sd = 1),
-    time == 1 & treatment_group == 0 ~ rnorm(n = 1, mean = 6, sd = 1),
-    time == 0 & treatment_group == 1 ~ rnorm(n = 1, mean = 8, sd = 1),
-    time == 1 & treatment_group == 1 ~ rnorm(n = 1, mean = 14, sd = 1),
-  )
-  )
-
-head(diff_in_diff_example_data)
-
-
-## Now Looking at a graphic
-
-diff_in_diff_example_data$treatment_group <- 
-  as.factor(diff_in_diff_example_data$treatment_group)
-
-diff_in_diff_example_data$time <- 
-  as.factor(diff_in_diff_example_data$time)
-
-diff_in_diff_example_data %>% 
-  ggplot(aes(x = time,
-             y = serve_speed,
-             color = treatment_group)) +
-  geom_point() +
-  geom_line(aes(group = person), alpha = 0.2) +
-  theme_minimal() +
-  labs(x = "Time period",
-       y = "Serve speed",
-       color = "Person got a new racket") +
-  scale_color_brewer(palette = "Set1")
-
-# As it is a simple example, we could do this manually,
-# by getting the average difference of the differences.
-
-average_differences <- 
-  diff_in_diff_example_data %>% 
-  pivot_wider(names_from = time,
-              values_from = serve_speed,
-              names_prefix = "time_") %>% 
-  mutate(difference = time_1 - time_0) %>% 
-  group_by(treatment_group) %>% 
-  summarise(average_difference = mean(difference))
-
-average_differences$average_difference[2] - average_differences$average_difference[1]
-
-diff_in_diff_example_regression <- 
-  lm(serve_speed ~ treatment_group*time, 
-     data = diff_in_diff_example_data)
-
-tidy(diff_in_diff_example_regression)
-```
-
-# Regression Discontinuity
-
-```{r}
-#install.packages("rdrobust")
-library(rdrobust)
-
-set.seed(853)
-
-number_of_observation <- 2000
-
-rdd_example_data <- tibble(person = c(1:number_of_observation),
-                           grade = runif(number_of_observation, 
-                                         min = 78, max = 82),
-                           income = rnorm(number_of_observation, 10, 1)
-)
-
-# We want to make income more likely to be higher if 
-# they are have a grade over 80
-rdd_example_data <- 
-  rdd_example_data %>% 
-  mutate(income = if_else(grade > 80, income + 2, income))
-
-head(rdd_example_data)
-
-# Let's make a graph.
-
-rdd_example_data %>% 
-  ggplot(aes(x = grade,
-             y = income)) +
-  geom_point(alpha = 0.2) +
-  geom_smooth(data = rdd_example_data %>% filter(grade < 80), 
-              method='lm',
-              color = "black") +
-  geom_smooth(data = rdd_example_data %>% filter(grade >= 80), 
-              method='lm',
-              color = "black") +
-  theme_minimal() +
-  labs(x = "Grade",
-       y = "Income ($)")
-
-
-# We can use a dummy variable with linear regression 
-# to estimate the effect (we're hoping that it's 2 because 
-# that is what we imposed.)
-
-rdd_example_data <- 
-  rdd_example_data %>% 
-  mutate(grade_80_and_over = if_else(grade < 80, 0, 1)) 
-
-lm(income ~ grade + grade_80_and_over, data = rdd_example_data) %>% 
-  tidy()
-
-# Please note: There are various caveats to this estimate
-# but the essentials are here
-```
-
 
